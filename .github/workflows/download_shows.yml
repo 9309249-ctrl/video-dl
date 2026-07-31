@@ -8,7 +8,7 @@ on:
         required: false
         default: "both"
       max_episodes:
-        description: "Max episodes per show"
+        description: "Max episodes to download"
         required: false
         default: "40"
 
@@ -24,13 +24,11 @@ jobs:
       - name: Install tools
         run: pip install -q yt-dlp requests
 
-      - name: Get video list (Invidious)
-        run: |
-          # HaMerotz LaMilyon channel
-          python3 get_channel_videos.py UCCZJsM_vF-zx0sl1RwbWXFw /tmp/marotz.json 1800
+      - name: Get video IDs from RSS
+        run: python3 get_channel_videos.py UCCZJsM_vF-zx0sl1RwbWXFw /tmp/marotz_all.json 0
 
-      - name: Download episodes
-        run: python3 download_from_list.py /tmp/marotz.json /tmp/videos ${{ inputs.max_episodes }}
+      - name: Download full episodes
+        run: python3 download_from_list.py /tmp/marotz_all.json /tmp/videos ${{ inputs.max_episodes }} 1800
 
       - name: Upload to Drive
         env:
@@ -50,54 +48,11 @@ jobs:
       - name: Install tools
         run: pip install -q yt-dlp requests
 
-      - name: Get video list (Invidious)
-        run: |
-          # MasterChef Israel - try known channel ID
-          python3 get_channel_videos.py UCrOvNizOg3TUfC7fBfZuDzw /tmp/masterchef.json 1800 || true
-          # Also try searching
-          python3 - << 'SEARCH'
-          import requests, json
-          INSTANCES = ["https://inv.tux.pizza","https://invidious.privacydev.net"]
-          videos = []
-          for inst in INSTANCES:
-              try:
-                  r = requests.get(f"{inst}/api/v1/search",
-                      params={"q":"masterchef israel 2024 episode full","type":"video","sort_by":"relevance"},
-                      timeout=15)
-                  if r.ok:
-                      for v in r.json():
-                          if v.get('lengthSeconds',0) > 2400 and 'masterchef' in v.get('title','').lower():
-                              videos.append({'id':v['videoId'],'title':v['title'],'duration':v['lengthSeconds']})
-                      if videos: break
-              except Exception as e:
-                  print(f"{inst}: {e}")
-          print(f"Search found: {len(videos)} videos")
-          with open('/tmp/masterchef_search.json','w',encoding='utf-8') as f:
-              json.dump(videos,f,ensure_ascii=False)
-          SEARCH
+      - name: Get video IDs from RSS
+        run: python3 get_channel_videos.py UCrOvNizOg3TUfC7fBfZuDzw /tmp/mc_all.json 0 || echo "Channel not found"
 
       - name: Download episodes
-        run: |
-          # Merge lists
-          python3 - << 'MERGE'
-          import json, os
-          videos = []
-          for fn in ['/tmp/masterchef.json', '/tmp/masterchef_search.json']:
-              try:
-                  with open(fn, encoding='utf-8') as f:
-                      videos += json.load(f)
-              except: pass
-          seen = set()
-          unique = []
-          for v in videos:
-              if v.get('id') not in seen:
-                  seen.add(v['id'])
-                  unique.append(v)
-          print(f"Total unique episodes: {len(unique)}")
-          with open('/tmp/mc_combined.json','w',encoding='utf-8') as f:
-              json.dump(unique,f,ensure_ascii=False)
-          MERGE
-          python3 download_from_list.py /tmp/mc_combined.json /tmp/videos ${{ inputs.max_episodes }}
+        run: python3 download_from_list.py /tmp/mc_all.json /tmp/videos ${{ inputs.max_episodes }} 1800
 
       - name: Upload to Drive
         env:
