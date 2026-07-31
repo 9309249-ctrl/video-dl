@@ -1,19 +1,61 @@
 #!/usr/bin/env python3
-"""Use Playwright to search YouTube and find channel IDs.
+"""Use Playwright to find Israeli YouTube channel IDs.
 Works from GitHub Actions (Playwright bypasses bot detection for browsing).
 """
 import asyncio, json, sys, re
+from xml.etree import ElementTree as ET
+import urllib.request
 
-SEARCHES = [
-    "מאסטר שף ישראל עונה 12",
-    "masterchef israel season 12",
-    "רשת 13 מאסטר שף",
-]
+RSS_BASE = "https://www.youtube.com/feeds/videos.xml?channel_id="
 
 
-async def find_channel(query):
+def check_rss(channel_id):
+    try:
+        url = RSS_BASE + channel_id
+        with urllib.request.urlopen(url, timeout=10) as r:
+            content = r.read().decode()
+        root = ET.fromstring(content)
+        ns = {"atom": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015"}
+        title_el = root.find("atom:title", ns)
+        entries = root.findall("atom:entry", ns)
+        titles = []
+        for entry in entries[:5]:
+            t = entry.find("atom:title", ns)
+            if t is not None:
+                titles.append(t.text[:60])
+        return {
+            "name": title_el.text if title_el is not None else "?",
+            "count": len(entries),
+            "titles": titles
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+async def visit_page(url, browser):
+    ctx = await browser.new_context(
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        locale="he-IL",
+        timezone_id="Asia/Jerusalem"
+    )
+    page = await ctx.new_page()
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+    except Exception as e:
+        print(f"  Nav error for {url}: {e}", file=sys.stderr)
+
+    await asyncio.sleep(4)
+    content = await page.content()
+    await ctx.close()
+    return content
+
+
+async def main():
     from playwright.async_api import async_playwright
-    found = {}
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -21,87 +63,79 @@ async def find_channel(query):
             args=["--no-sandbox", "--disable-setuid-sandbox",
                   "--disable-blink-features=AutomationControlled"]
         )
-        ctx = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            locale="he-IL",
-            timezone_id="Asia/Jerusalem"
-        )
-        page = await ctx.new_page()
 
-        search_url = f"https://www.youtube.com/results?search_query={query.replace(' ', '+')}&sp=EgIQAg%253D%253D"
-        print(f"\nSearching: {query}", file=sys.stderr)
-        print(f"URL: {search_url}", file=sys.stderr)
+        # Step 1: Try known Israeli channel handles directly
+        handles_to_try = [
+            ("reshet13", "Reshet 13"),
+            ("keshet12", "Keshet 12"),
+            ("kan11", "Kan 11"),
+            ("reshet13official", "Reshet 13 official"),
+            ("reshet", "Reshet"),
+            ("masterchefisrael", "MasterChef Israel"),
+            ("masterchefil", "MC Israel alt"),
+        ]
 
-        try:
-            await page.goto(search_url, wait_until="domcontentloaded", timeout=25000)
-        except Exception as e:
-            print(f"Nav error: {e}", file=sys.stderr)
+        print("\n=== Direct handle lookups ===")
+        found_channels = {}
 
-        await asyncio.sleep(5)
+        for handle, label in handles_to_try:
+            url = f"https://www.youtube.com/@{handle}"
+            print(f"\nVisiting {url} ({label})...", file=sys.stderr)
+            content = await visit_page(url, browser)
 
-        # Extract channel links and IDs from page content
-        content = await page.content()
+            # Extract channel ID from page
+            cids = re.findall(r'"channelId"\s*:\s*"(UC[A-Za-z0-9_-]{22})"', content)
+            external_id = re.findall(r'"externalId"\s*:\s*"(UC[A-Za-z0-9_-]{22})"', content)
+            all_ids = list(set(cids + external_id))
 
-        # Find channel IDs in page HTML
-        channel_ids = re.findall(r'"channelId"\s*:\s*"(UC[A-Za-z0-9_-]{22})"', content)
-        channel_names = re.findall(r'"ownerText"\s*:\s*\{"runs"\s*:\s*\[\{"text"\s*:\s*"([^"]+)"', content)
-        channel_urls = re.findall(r'"canonicalBaseUrl"\s*:\s*"(/channel/[^"]+|/@[^"]+)"', content)
+            if all_ids:
+                for cid in all_ids[:2]:
+                    rss = check_rss(cid)
+                    print(f"  @{handle} = {cid} | {rss.get('name', '?')} | {rss.get('count', 0)} videos")
+                    if rss.get('titles'):
+                        for t in rss['titles'][:2]:
+                            print(f"    - {t}")
+                    found_channels[cid] = {"handle": handle, "label": label, "rss": rss}
+            else:
+                # Check if we got a 404 or redirect
+                if "404" in content[:500] or "not found" in content[:500].lower():
+                    print(f"  @{handle}: 404 not found")
+                else:
+                    print(f"  @{handle}: loaded but no channel ID found")
 
-        print(f"Channel IDs found: {set(channel_ids)}", file=sys.stderr)
-        print(f"Channel names found: {channel_names[:5]}", file=sys.stderr)
-        print(f"Channel URLs found: {channel_urls[:5]}", file=sys.stderr)
+        # Step 2: Search YouTube for videos and extract channels
+        print("\n=== Video search for מרוץ למיליון ===")
+        search_url = "https://www.youtube.com/results?search_query=מרוץ+למיליון+עונה+2+פרק"
+        content = await visit_page(search_url, browser)
+        cids = re.findall(r'"channelId"\s*:\s*"(UC[A-Za-z0-9_-]{22})"', content)
+        ch_names_raw = re.findall(r'"longBylineText".*?"text"\s*:\s*"([^"]+)"', content[:100000])
+        print(f"  Channel IDs in results: {set(cids)}", file=sys.stderr)
+        print(f"  Channel names: {ch_names_raw[:5]}", file=sys.stderr)
+        for cid in set(cids):
+            if cid not in found_channels:
+                rss = check_rss(cid)
+                if rss.get('name') and 'מרוץ' in str(rss.get('titles', [])):
+                    print(f"  {cid}: {rss.get('name')} | {rss.get('count')} videos")
+                    print(f"    Titles: {rss.get('titles', [])[:2]}")
+                    found_channels[cid] = {"context": "marotz_search", "rss": rss}
 
-        # Also look for video items with channel info
-        items = re.findall(
-            r'"videoId"\s*:\s*"([^"]+)".*?"ownerText".*?"text"\s*:\s*"([^"]+)".*?"canonicalBaseUrl"\s*:\s*"([^"]+)"',
-            content[:200000]
-        )
-        for vid_id, owner, url in items[:5]:
-            print(f"  Video {vid_id} | Channel: {owner} | URL: {url}", file=sys.stderr)
-
-        for cid in channel_ids:
-            found[cid] = found.get(cid, 0) + 1
+        print("\n=== Video search for מאסטר שף ===")
+        search_url2 = "https://www.youtube.com/results?search_query=מאסטר+שף+ישראל+עונה+12+פרק+1"
+        content2 = await visit_page(search_url2, browser)
+        cids2 = re.findall(r'"channelId"\s*:\s*"(UC[A-Za-z0-9_-]{22})"', content2)
+        print(f"  Channel IDs: {set(cids2)}", file=sys.stderr)
+        for cid in set(cids2):
+            if cid not in found_channels:
+                rss = check_rss(cid)
+                if rss.get('count', 0) > 5:
+                    print(f"  {cid}: {rss.get('name')} | {rss.get('count')} videos")
+                    print(f"    Titles: {rss.get('titles', [])[:2]}")
+                    found_channels[cid] = {"context": "masterchef_search", "rss": rss}
 
         await browser.close()
 
-    return found
-
-
-async def main():
-    all_found = {}
-    for query in SEARCHES[:2]:  # Limit to 2 searches to save time
-        result = await find_channel(query)
-        for cid, count in result.items():
-            all_found[cid] = all_found.get(cid, 0) + count
-
-    print("\n=== Channel IDs found ===")
-    if all_found:
-        for cid, count in sorted(all_found.items(), key=lambda x: -x[1]):
-            print(f"  {cid} (seen {count} times)")
-            # Test RSS for this channel
-            import urllib.request
-            try:
-                rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={cid}"
-                with urllib.request.urlopen(rss_url, timeout=10) as r:
-                    content = r.read().decode()
-                    import xml.etree.ElementTree as ET
-                    root = ET.fromstring(content)
-                    ns = {"atom": "http://www.w3.org/2005/Atom"}
-                    title_el = root.find("atom:title", ns)
-                    entries = root.findall("atom:entry", ns)
-                    print(f"    RSS: {len(entries)} videos | Name: {title_el.text if title_el is not None else '?'}")
-            except Exception as e:
-                print(f"    RSS error: {e}")
-    else:
-        print("  No channels found")
-
-    # Output JSON result
-    result = {"channels": all_found}
-    print("\n" + json.dumps(result))
+    print("\n=== FINAL RESULTS ===")
+    print(json.dumps(found_channels, ensure_ascii=False, indent=2))
 
 
 asyncio.run(main())
