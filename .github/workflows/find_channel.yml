@@ -1,0 +1,21 @@
+name: Find MasterChef YouTube Channel
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  find:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          pip install -q playwright requests
+          python -m playwright install chromium --with-deps 2>&1 | tail -2
+
+      - name: Search YouTube for MasterChef Israel channel
+        run: python find_channel_playwright.py
+        continue-on-error: true
