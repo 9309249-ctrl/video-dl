@@ -24,11 +24,25 @@ jobs:
       - name: Install tools
         run: pip install -q yt-dlp requests
 
+      - name: Setup YouTube cookies
+        run: |
+          if [ -n "${{ secrets.YOUTUBE_COOKIES }}" ]; then
+            echo "${{ secrets.YOUTUBE_COOKIES }}" > /tmp/yt_cookies.txt
+            echo "Cookies file ready ($(wc -l < /tmp/yt_cookies.txt) lines)"
+          else
+            echo "No cookies secret found — bot detection may block downloads"
+          fi
+
       - name: Get video IDs from RSS
         run: python3 get_channel_videos.py UCCZJsM_vF-zx0sl1RwbWXFw /tmp/marotz_all.json 0
 
       - name: Download full episodes
-        run: python3 download_from_list.py /tmp/marotz_all.json /tmp/videos ${{ inputs.max_episodes }} 1800
+        run: |
+          COOKIES_ARG=""
+          if [ -f /tmp/yt_cookies.txt ]; then
+            COOKIES_ARG="--cookies /tmp/yt_cookies.txt"
+          fi
+          python3 download_from_list.py /tmp/marotz_all.json /tmp/videos ${{ inputs.max_episodes }} 1800 "$COOKIES_ARG"
 
       - name: Upload to Drive
         env:
@@ -48,11 +62,31 @@ jobs:
       - name: Install tools
         run: pip install -q yt-dlp requests
 
+      - name: Setup YouTube cookies
+        run: |
+          if [ -n "${{ secrets.YOUTUBE_COOKIES }}" ]; then
+            echo "${{ secrets.YOUTUBE_COOKIES }}" > /tmp/yt_cookies.txt
+            echo "Cookies file ready"
+          else
+            echo "No cookies — downloads may fail"
+          fi
+
       - name: Get video IDs from RSS
-        run: python3 get_channel_videos.py UCrOvNizOg3TUfC7fBfZuDzw /tmp/mc_all.json 0 || echo "Channel not found"
+        run: |
+          MC_CHANNEL="${{ secrets.MASTERCHEF_CHANNEL_ID }}"
+          if [ -z "$MC_CHANNEL" ]; then
+            MC_CHANNEL="UCrOvNizOg3TUfC7fBfZuDzw"
+            echo "Using default MasterChef channel ID (may be wrong)"
+          fi
+          python3 get_channel_videos.py "$MC_CHANNEL" /tmp/mc_all.json 0 || echo "Channel RSS failed"
 
       - name: Download episodes
-        run: python3 download_from_list.py /tmp/mc_all.json /tmp/videos ${{ inputs.max_episodes }} 1800
+        run: |
+          COOKIES_ARG=""
+          if [ -f /tmp/yt_cookies.txt ]; then
+            COOKIES_ARG="--cookies /tmp/yt_cookies.txt"
+          fi
+          python3 download_from_list.py /tmp/mc_all.json /tmp/videos ${{ inputs.max_episodes }} 1800 "$COOKIES_ARG"
 
       - name: Upload to Drive
         env:
