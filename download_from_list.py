@@ -2,6 +2,13 @@
 """Download videos from JSON list using yt-dlp, filter by minimum duration"""
 import json, subprocess, os, glob, sys
 
+YT_EXTRA = [
+    '--extractor-args', 'youtube:player_client=ios,web',
+    '--sleep-interval', '1',
+    '--max-sleep-interval', '3',
+    '--user-agent', 'com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iPhone OS 17_5_1 like Mac OS X)',
+]
+
 def download_video(vid_id, out_dir, index):
     cmd = [
         'yt-dlp',
@@ -12,6 +19,7 @@ def download_video(vid_id, out_dir, index):
         '--fragment-retries', '5',
         '--socket-timeout', '60',
         '--no-warnings',
+        *YT_EXTRA,
         f'https://www.youtube.com/watch?v={vid_id}'
     ]
     result = subprocess.run(cmd, timeout=7200)
@@ -20,7 +28,8 @@ def download_video(vid_id, out_dir, index):
 def check_duration(vid_id):
     result = subprocess.run(
         ['yt-dlp', '--no-download', '--print', '%(duration)s',
-         '--no-warnings', f'https://www.youtube.com/watch?v={vid_id}'],
+         '--no-warnings', *YT_EXTRA,
+         f'https://www.youtube.com/watch?v={vid_id}'],
         capture_output=True, text=True, timeout=30
     )
     if result.returncode != 0:
