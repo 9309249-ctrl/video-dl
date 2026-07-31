@@ -1,0 +1,79 @@
+name: Download Israeli TV Shows
+
+on:
+  workflow_dispatch:
+    inputs:
+      show:
+        description: "Show to download: marotz / masterchef / both"
+        required: false
+        default: "both"
+      min_duration:
+        description: "Minimum duration in seconds (1800=30min)"
+        required: false
+        default: "1800"
+
+jobs:
+  download-marotz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    if: inputs.show == 'marotz' || inputs.show == 'both'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: pip install -q yt-dlp requests
+
+      - name: Download episodes
+        run: |
+          mkdir -p /tmp/videos
+          echo "=== Downloading from YouTube: HaMerotz LaMilyon ==="
+          yt-dlp \
+            --playlist-items 1-60 \
+            --match-filter "duration>${{ inputs.min_duration }}" \
+            -f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best" \
+            --merge-output-format mp4 \
+            -o "/tmp/videos/%(playlist_index)03d_%(title).70s.%(ext)s" \
+            --no-warnings --retries 5 --ignore-errors \
+            "https://www.youtube.com/channel/UCCZJsM_vF-zx0sl1RwbWXFw" 2>&1 | grep -v "^\[download\].*ETA" | tail -50
+          ls -lh /tmp/videos/ || echo "No files downloaded"
+
+      - name: Upload to Drive
+        env:
+          DRIVE_CLIENT_ID: ${{ secrets.DRIVE_CLIENT_ID }}
+          DRIVE_CLIENT_SECRET: ${{ secrets.DRIVE_CLIENT_SECRET }}
+          DRIVE_REFRESH_TOKEN: ${{ secrets.DRIVE_REFRESH_TOKEN }}
+        run: python3 upload_drive.py "המירוץ למיליון עונה 2"
+
+  download-masterchef:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    if: inputs.show == 'masterchef' || inputs.show == 'both'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: pip install -q yt-dlp requests
+
+      - name: Download episodes
+        run: |
+          mkdir -p /tmp/videos
+          echo "=== Downloading from YouTube: MasterChef Israel ==="
+          # Try the official channel handle
+          yt-dlp \
+            --playlist-items 1-60 \
+            --match-filter "duration>${{ inputs.min_duration }}" \
+            -f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best" \
+            --merge-output-format mp4 \
+            -o "/tmp/videos/%(playlist_index)03d_%(title).70s.%(ext)s" \
+            --no-warnings --retries 5 --ignore-errors \
+            "https://www.youtube.com/@%D7%9E%D7%90%D7%A1%D7%98%D7%A8-%D7%A9%D7%A3" 2>&1 | grep -v "^\[download\].*ETA" | tail -50
+          ls -lh /tmp/videos/ || echo "No files downloaded"
+
+      - name: Upload to Drive
+        env:
+          DRIVE_CLIENT_ID: ${{ secrets.DRIVE_CLIENT_ID }}
+          DRIVE_CLIENT_SECRET: ${{ secrets.DRIVE_CLIENT_SECRET }}
+          DRIVE_REFRESH_TOKEN: ${{ secrets.DRIVE_REFRESH_TOKEN }}
+        run: python3 upload_drive.py "מאסטר שף עונה 12"
