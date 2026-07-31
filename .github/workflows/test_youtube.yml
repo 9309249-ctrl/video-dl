@@ -1,0 +1,58 @@
+name: Test YouTube Download Methods
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_id:
+        description: 'YouTube video ID to test'
+        required: false
+        default: 'jNQXAC9IVRw'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          pip install -q yt-dlp requests playwright
+          python -m playwright install chromium --with-deps 2>&1 | tail -3
+          yt-dlp --version
+          echo "IP: $(curl -s https://api.ipify.org)"
+
+      - name: Extract po-token via Playwright
+        run: |
+          python extract_po_token.py > /tmp/yt_tokens.json
+          echo "Exit: $?"
+          cat /tmp/yt_tokens.json
+        continue-on-error: true
+
+      - name: Find MasterChef channel ID
+        run: python find_masterchef_channel.py
+        continue-on-error: true
+
+      - name: Test all YouTube methods
+        run: python test_youtube.py
+        continue-on-error: true
+
+      - name: Attempt actual download
+        run: |
+          mkdir -p /tmp/dl
+          VIDEO="${{ github.event.inputs.video_id }}"
+          METHODS="web_creator tv_embedded mweb ios android"
+          for CLIENT in $METHODS; do
+            echo "--- Trying $CLIENT ---"
+            if yt-dlp --extractor-args "youtube:player_client=$CLIENT" \
+              -f "best[height<=480]" --no-warnings \
+              --output "/tmp/dl/$CLIENT.%(ext)s" \
+              --max-filesize 50m \
+              "https://www.youtube.com/watch?v=$VIDEO" 2>&1 | tail -5; then
+              echo "SUCCESS with $CLIENT"
+              break
+            fi
+          done
+          ls -lh /tmp/dl/ 2>/dev/null || echo "No downloads"
+        continue-on-error: true
