@@ -1,0 +1,96 @@
+name: Download Al HaMashmaut Podcast
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_episodes:
+        description: "Max episodes to download (audio mp3)"
+        required: false
+        default: "5"
+      offset:
+        description: "Skip first N episodes (0=newest)"
+        required: false
+        default: "0"
+
+jobs:
+  download-mashmaut:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          pip install -q yt-dlp requests
+
+      - name: Setup YouTube cookies
+        run: |
+          if [ -n "${{ secrets.YOUTUBE_COOKIES }}" ]; then
+            echo "${{ secrets.YOUTUBE_COOKIES }}" > /tmp/yt_cookies.txt
+            echo "Cookies ready ($(wc -l < /tmp/yt_cookies.txt) lines)"
+          fi
+
+      - name: Enumerate channel (flat-playlist, full list)
+        run: |
+          mkdir -p /tmp/videos
+          COOKIES_ARG=""
+          [ -f /tmp/yt_cookies.txt ] && COOKIES_ARG="--cookies /tmp/yt_cookies.txt"
+          yt-dlp --flat-playlist --print-json $COOKIES_ARG \
+            "https://www.youtube.com/channel/UCYTuhQta56TImmjtO9s5K3g/videos" \
+            > /tmp/all_flat.jsonl 2> /tmp/enum_err.log || true
+          wc -l /tmp/all_flat.jsonl
+          head -1 /tmp/all_flat.jsonl | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print('sample:', d.get('id'), d.get('title',''))" || echo "empty"
+
+      - name: Build ordered list
+        run: |
+          python3 <<'PY'
+          import json
+          rows = []
+          with open('/tmp/all_flat.jsonl','r',encoding='utf-8') as f:
+              for line in f:
+                  try:
+                      d=json.loads(line)
+                      rows.append({'id':d.get('id'),'title':d.get('title','')})
+                  except Exception: pass
+          off=int("${{ inputs.offset }}")
+          n=int("${{ inputs.max_episodes }}")
+          picked=rows[off:off+n]
+          with open('/tmp/list.json','w',encoding='utf-8') as f:
+              json.dump(picked,f,ensure_ascii=False,indent=2)
+          print(f"picked {len(picked)} of {len(rows)}")
+          for r in picked: print(' -', r['id'], r['title'][:60])
+          PY
+
+      - name: Download audio (mp3)
+        run: |
+          COOKIES_ARG=""
+          [ -f /tmp/yt_cookies.txt ] && COOKIES_ARG="--cookies /tmp/yt_cookies.txt"
+          python3 <<PY
+          import json, subprocess, os
+          with open('/tmp/list.json','r',encoding='utf-8') as f:
+              lst=json.load(f)
+          for i,it in enumerate(lst,1):
+              vid=it['id']; ttl=it['title'][:80].replace('/','_').replace('\\\\','_')
+              out=f'/tmp/videos/{i:03d}_{ttl}.%(ext)s'
+              cmd=['yt-dlp','-x','--audio-format','mp3','--audio-quality','0',
+                   '-o',out,'--retries','5','--fragment-retries','5','--no-warnings',
+                   '--extractor-args','youtube:player_client=tv,ios,mweb,web_safari',
+                   f'https://www.youtube.com/watch?v={vid}']
+              c='${{ secrets.YOUTUBE_COOKIES }}'
+              if c: cmd += ['--cookies','/tmp/yt_cookies.txt']
+              print('===',i,vid,ttl); subprocess.call(cmd)
+          import glob; print('files:', len(glob.glob('/tmp/videos/*.mp3')))
+          PY
+
+      - name: Upload to Drive
+        env:
+          CLIENT_ID: ${{ secrets.DRIVE_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.DRIVE_CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.DRIVE_REFRESH_TOKEN }}
+          FOLDER_NAME: "על המשמעות - יוטיוב"
+        run: |
+          mkdir -p /tmp/video
+          cp /tmp/videos/*.mp3 /tmp/video/ 2>/dev/null || true
+          python3 upload_drive.py "על המשמעות - יוטיוב"
