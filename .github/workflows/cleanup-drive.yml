@@ -1,0 +1,94 @@
+name: Cleanup Drive (empty folders + duplicate files)
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'report (dry-run) or apply (trash)'
+        default: 'report'
+jobs:
+  clean:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Scan / clean
+        env:
+          CLIENT_ID: ${{ secrets.DRIVE_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.DRIVE_CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.DRIVE_REFRESH_TOKEN }}
+          MODE: ${{ inputs.mode || 'report' }}
+        run: |
+          python3 << 'PYEOF'
+          import urllib.request as R, urllib.parse as P, json, os, sys, time as _t
+          MODE=os.environ.get('MODE','report')
+          _td=P.urlencode({'client_id':os.environ['CLIENT_ID'],'client_secret':os.environ['CLIENT_SECRET'],
+                           'refresh_token':os.environ['REFRESH_TOKEN'],'grant_type':'refresh_token'}).encode()
+          tok=json.load(R.urlopen(R.Request('https://oauth2.googleapis.com/token',data=_td,method='POST')))
+          token=tok['access_token']
+          print('SCOPES:',tok.get('scope','?'),flush=True)
+          def api(u,m='GET',b=None):
+              last=None
+              for a in range(5):
+                  try:
+                      h={'Authorization':f'Bearer {token}'}
+                      if b is not None: h['Content-Type']='application/json'
+                      return json.load(R.urlopen(R.Request(u,data=(json.dumps(b).encode() if b is not None else None),headers=h,method=m),timeout=120))
+                  except Exception as e: last=e; _t.sleep(3)
+              raise last
+          def listall(q,fields):
+              out,pg=[],None
+              while True:
+                  u='https://www.googleapis.com/drive/v3/files?q='+P.quote(q)+'&fields=nextPageToken,'+fields+'&pageSize=1000&corpora=user'
+                  if pg:u+='&pageToken='+pg
+                  r=api(u);out+=r.get('files',[]);pg=r.get('nextPageToken')
+                  if not pg:break
+              return out
+
+          # ---- all folders + all files (owned by me), globally ----
+          folders=listall("mimeType='application/vnd.google-apps.folder' and trashed=false and 'me' in owners",'files(id,name,parents)')
+          files=listall("mimeType!='application/vnd.google-apps.folder' and trashed=false and 'me' in owners",'files(id,name,parents,md5Checksum,size,modifiedTime)')
+          print(f'TOTAL folders(owned): {len(folders)} | files(owned): {len(files)}',flush=True)
+
+          # child counts
+          child_folders={}; child_files={}
+          for f in folders:
+              for p in f.get('parents',[]): child_folders.setdefault(p,[]).append(f['id'])
+          for f in files:
+              for p in f.get('parents',[]): child_files.setdefault(p,0); child_files[p]+=1
+          fid2f={f['id']:f for f in folders}
+          # subtree has file? memoized
+          memo={}
+          def has_file(fid):
+              if fid in memo: return memo[fid]
+              memo[fid]=False  # guard cycles
+              res = child_files.get(fid,0)>0
+              if not res:
+                  for c in child_folders.get(fid,[]):
+                      if has_file(c): res=True; break
+              memo[fid]=res; return res
+          empty=[f for f in folders if not has_file(f['id'])]
+          # only trash TOP-most empty (parent not empty or parent is not a folder we own)
+          empty_ids=set(f['id'] for f in empty)
+          top_empty=[f for f in empty if not any(p in empty_ids for p in f.get('parents',[]))]
+
+          # duplicate files: same parent + same name + same md5
+          seen={}; dups=[]
+          for f in files:
+              key=(tuple(f.get('parents',[])),f['name'],f.get('md5Checksum'))
+              if f.get('md5Checksum') and key in seen: dups.append(f)
+              else: seen[key]=f['id']
+
+          print(f'\n=== EMPTY FOLDERS (top-most): {len(top_empty)} (total empty incl. nested: {len(empty)}) ===',flush=True)
+          for f in top_empty[:60]: print('  [empty]',f['name'],flush=True)
+          print(f'\n=== EXACT DUPLICATE FILES (same name+parent+md5): {len(dups)} ===',flush=True)
+          for f in dups[:60]: print('  [dup]',f['name'],flush=True)
+
+          if MODE=='apply':
+              n=0
+              for f in top_empty+dups:
+                  try: api(f"https://www.googleapis.com/drive/v3/files/{f['id']}",'PATCH',{'trashed':True}); n+=1
+                  except Exception as e: print('  ERR trash',f['name'][:40],str(e)[:60])
+                  if n%50==0: print(f'  trashed {n}...',flush=True)
+              print(f'\nAPPLIED: trashed {n} items (empty folders + duplicate files). Reversible from Drive Trash.',flush=True)
+          else:
+              print('\nREPORT MODE — nothing trashed. Re-run with mode=apply to execute.',flush=True)
+          PYEOF
