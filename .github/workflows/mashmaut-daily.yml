@@ -1,0 +1,144 @@
+name: Al HaMashmaut - Daily (by series -> Drive)
+on:
+  schedule:
+    - cron: '30 2 * * *'          # 02:00 UTC = 05:00 IDT, before the 08:00 email
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'Max new videos this run (raise for first backlog run)'
+        default: '40'
+      quality:
+        description: 'Max height (480/720/1080)'
+        default: '480'
+
+concurrency:
+  group: mashmaut-daily
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Enable WARP (bypass geo)
+        uses: fscarmen/warp-on-actions@v1.1
+        with:
+          stack: dual
+      - name: Install Deno (JS runtime required by yt-dlp for YouTube)
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y ffmpeg
+          pip install -q --upgrade yt-dlp
+      - name: Download by series
+        env:
+          CLIENT_ID: ${{ secrets.DRIVE_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.DRIVE_CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.DRIVE_REFRESH_TOKEN }}
+          LIMIT: ${{ inputs.limit || '40' }}
+          MAXH: ${{ inputs.quality || '480' }}
+        run: |
+          python3 << 'PYEOF'
+          import urllib.request as R, urllib.parse as P, json, os, subprocess, sys, re
+
+          if not (os.environ.get('CLIENT_ID') and os.environ.get('CLIENT_SECRET') and os.environ.get('REFRESH_TOKEN')):
+              sys.stderr.write('::error::DRIVE_* secrets missing\n'); sys.exit(1)
+          CHANNEL='https://www.youtube.com/channel/UCYTuhQta56TImmjtO9s5K3g/videos'
+          ROOT_NAME='על המשמעות - יוטיוב'
+          MAXH=int(os.environ.get('MAXH','480')); LIMIT=int(os.environ.get('LIMIT','40'))
+
+          _td=P.urlencode({'client_id':os.environ['CLIENT_ID'],'client_secret':os.environ['CLIENT_SECRET'],
+                           'refresh_token':os.environ['REFRESH_TOKEN'],'grant_type':'refresh_token'}).encode()
+          def refresh(): return json.load(R.urlopen(R.Request('https://oauth2.googleapis.com/token',data=_td,method='POST')))['access_token']
+          token=refresh()
+          def api(u,m='GET',b=None):
+              h={'Authorization':f'Bearer {token}'}
+              if b is not None: h['Content-Type']='application/json'
+              return json.load(R.urlopen(R.Request(u,data=(json.dumps(b).encode() if b is not None else None),headers=h,method=m),timeout=90))
+          def qf(query,fields='files(id,name,mimeType)'):
+              out,pg=[],None
+              while True:
+                  u='https://www.googleapis.com/drive/v3/files?q='+P.quote(query)+'&fields=nextPageToken,'+fields+'&pageSize=1000'
+                  if pg:u+='&pageToken='+pg
+                  r=api(u);out+=r.get('files',[]);pg=r.get('nextPageToken')
+                  if not pg:break
+              return out
+          def ensure(parent,name):
+              nm=name.replace('\\','\\\\').replace("'","\\'")
+              r=qf(f"name='{nm}' and '{parent}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false")
+              if r:return r[0]['id']
+              return api('https://www.googleapis.com/drive/v3/files','POST',{'name':name,'mimeType':'application/vnd.google-apps.folder','parents':[parent]})['id']
+
+          f=qf(f"name='{ROOT_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false")
+          root=f[0]['id'] if f else api('https://www.googleapis.com/drive/v3/files','POST',{'name':ROOT_NAME,'mimeType':'application/vnd.google-apps.folder'})['id']
+          print('Root:',root,flush=True)
+
+          # existing ids across ALL nested folders (dedup)
+          existing=set()
+          def scan(fid):
+              for c in qf(f"'{fid}' in parents and trashed=false"):
+                  if c['mimeType']=='application/vnd.google-apps.folder': scan(c['id'])
+                  else:
+                      m=re.search(r'\[([\w-]{6,})\]',c.get('name',''))
+                      if m: existing.add(m.group(1))
+          scan(root)
+          print('Existing episodes:',len(existing),flush=True)
+
+          res=subprocess.run(['yt-dlp','--flat-playlist','--print','%(id)s\t%(title)s',CHANNEL],capture_output=True,text=True,timeout=600)
+          rows=[l.split('\t',1) for l in res.stdout.split('\n') if '\t' in l]
+          if not rows: sys.stderr.write('::warning::0 rows. '+res.stderr[-400:]+'\n')
+          new=[(vid,title) for vid,title in rows if vid not in existing][:LIMIT]
+          print(f'Channel total: {len(rows)} | new: {len(new)}',flush=True)
+          if not new: print('Nothing new.'); sys.exit(0)
+
+          def series_of(title):
+              parts=[p.strip() for p in re.split(r'[｜|]',title) if p.strip()]
+              s=parts[0] if parts else title
+              s=re.sub(r'^(עם |with |on |the )','',s,flags=re.I).strip()
+              s=re.sub(r'[\\/:*?"<>]',' ',s).strip()
+              s=re.sub(r'\s*(episode|פרק)\s*\S*$','',s,flags=re.I).strip()
+              return (s[:70] or 'כללי')
+
+          os.makedirs('dl',exist_ok=True)
+          series_cache={}; done=0; manifest=[]
+          for i,(vid,title) in enumerate(new):
+              if i and i%8==0: token=refresh()
+              r=subprocess.run(['yt-dlp','-f',f'best[height<={MAXH}]/best','--no-playlist',
+                                '-o','dl/%(title)s [%(id)s].%(ext)s',f'https://www.youtube.com/watch?v={vid}'],
+                               capture_output=True,text=True,timeout=1500)
+              if r.returncode!=0: print(f'DL FAIL {vid}: {r.stderr[-160:]}',flush=True); continue
+              fl=[x for x in os.listdir('dl') if f'[{vid}]' in x]
+              if not fl: continue
+              fn=fl[0]; path=os.path.join('dl',fn); series=series_of(title)
+              sid=series_cache.get(series) or series_cache.setdefault(series,ensure(root,series))
+              with open(path,'rb') as fh: data=fh.read()
+              bnd='----TE'; meta=json.dumps({'name':fn,'parents':[sid]}).encode()
+              body=(f'--{bnd}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'.encode()+meta+
+                    f'\r\n--{bnd}\r\nContent-Type: video/mp4\r\n\r\n'.encode()+data+f'\r\n--{bnd}--\r\n'.encode())
+              try:
+                  R.urlopen(R.Request('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',data=body,method='POST',
+                      headers={'Authorization':f'Bearer {token}','Content-Type':f'multipart/related; boundary={bnd}'}),timeout=1800).read()
+                  done+=1; manifest.append({'series':series,'title':title,'id':vid})
+                  print(f'OK [{i+1}/{len(new)}] {series} :: {title[:55]} ({len(data)//1048576}MB)',flush=True)
+              except Exception as e:
+                  print(f'UP ERR {fn[:40]}: {str(e)[:120]}',flush=True)
+              try: os.remove(path)
+              except: pass
+
+          # manifest _last_run.json at root (read by email job)
+          mb=json.dumps({'downloaded':done,'items':manifest},ensure_ascii=False).encode()
+          ex=qf(f"name='_last_run.json' and '{root}' in parents and trashed=false")
+          bnd='----MAN'
+          if ex:
+              meta=json.dumps({'name':'_last_run.json'}).encode()
+              url=f'https://www.googleapis.com/upload/drive/v3/files/{ex[0]["id"]}?uploadType=multipart'; m='PATCH'
+          else:
+              meta=json.dumps({'name':'_last_run.json','parents':[root]}).encode()
+              url='https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart'; m='POST'
+          body=(f'--{bnd}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'.encode()+meta+
+                f'\r\n--{bnd}\r\nContent-Type: application/json\r\n\r\n'.encode()+mb+f'\r\n--{bnd}--\r\n'.encode())
+          R.urlopen(R.Request(url,data=body,method=m,headers={'Authorization':f'Bearer {token}','Content-Type':f'multipart/related; boundary={bnd}'}),timeout=120).read()
+          print(f'\nDone: {done}/{len(new)} new episodes into על המשמעות/<series>.')
+          PYEOF
