@@ -1,0 +1,55 @@
+name: Cleanup Empty Folders (Drive)
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '0 6 * * *'   # 09:00 IDT daily tidy
+jobs:
+  clean:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Trash empty folders under both roots
+        env:
+          CLIENT_ID: ${{ secrets.DRIVE_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.DRIVE_CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.DRIVE_REFRESH_TOKEN }}
+        run: |
+          python3 << 'PYEOF'
+          import urllib.request as R, urllib.parse as P, json, os, sys, time as _t
+          _td=P.urlencode({'client_id':os.environ['CLIENT_ID'],'client_secret':os.environ['CLIENT_SECRET'],
+                           'refresh_token':os.environ['REFRESH_TOKEN'],'grant_type':'refresh_token'}).encode()
+          token=json.load(R.urlopen(R.Request('https://oauth2.googleapis.com/token',data=_td,method='POST')))['access_token']
+          def api(u,m='GET',b=None):
+              last=None
+              for a in range(5):
+                  try:
+                      h={'Authorization':f'Bearer {token}'}
+                      if b is not None: h['Content-Type']='application/json'
+                      return json.load(R.urlopen(R.Request(u,data=(json.dumps(b).encode() if b is not None else None),headers=h,method=m),timeout=90))
+                  except Exception as e: last=e; _t.sleep(3)
+              raise last
+          def qf(parent):
+              out,pg=[],None
+              while True:
+                  u='https://www.googleapis.com/drive/v3/files?q='+P.quote(f"'{parent}' in parents and trashed=false")+'&fields=nextPageToken,files(id,name,mimeType)&pageSize=1000'
+                  if pg:u+='&pageToken='+pg
+                  r=api(u);out+=r.get('files',[]);pg=r.get('nextPageToken')
+                  if not pg:break
+              return out
+          trashed=[]
+          def has_file(fid):
+              hasf=False
+              for c in qf(fid):
+                  if c['mimeType']=='application/vnd.google-apps.folder':
+                      if has_file(c['id']): hasf=True
+                      else:
+                          api(f"https://www.googleapis.com/drive/v3/files/{c['id']}",'PATCH',{'trashed':True})
+                          trashed.append(c['name']); print('trashed empty:',c['name'],flush=True)
+                  else: hasf=True
+              return hasf
+          for name in ['תוכן אחד','על המשמעות - יוטיוב']:
+              r=api('https://www.googleapis.com/drive/v3/files?q='+P.quote(f"name='{name}' and mimeType='application/vnd.google-apps.folder' and trashed=false")+'&fields=files(id,name)')
+              for f in r.get('files',[]):
+                  print('== scanning',name,f['id']); has_file(f['id'])
+          print(f'\nDone. Trashed {len(trashed)} empty folders.')
+          PYEOF
