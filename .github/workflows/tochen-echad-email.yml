@@ -21,7 +21,7 @@ jobs:
           HOURS: ${{ inputs.hours || '26' }}
         run: |
           python3 << 'PYEOF'
-          import urllib.request as R, urllib.parse as P, json, os, sys, base64, datetime
+          import urllib.request as R, urllib.parse as P, json, os, sys, base64, datetime, re
 
           CLIENT_ID=os.environ['CLIENT_ID']; CLIENT_SECRET=os.environ['CLIENT_SECRET']; REFRESH=os.environ['REFRESH_TOKEN']
           HOURS=int(os.environ.get('HOURS','26'))
@@ -31,8 +31,7 @@ jobs:
 
           _td=P.urlencode({'client_id':CLIENT_ID,'client_secret':CLIENT_SECRET,'refresh_token':REFRESH,'grant_type':'refresh_token'}).encode()
           token=json.load(R.urlopen(R.Request('https://oauth2.googleapis.com/token',data=_td,method='POST')))['access_token']
-          def api(u):
-              return json.load(R.urlopen(R.Request(u,headers={'Authorization':f'Bearer {token}'}),timeout=90))
+          def api(u): return json.load(R.urlopen(R.Request(u,headers={'Authorization':f'Bearer {token}'}),timeout=90))
           def qf(query,fields='files(id,name,mimeType,createdTime,webViewLink)'):
               out,pg=[],None
               while True:
@@ -47,34 +46,28 @@ jobs:
           root=f[0]['id']
           cutoff=(datetime.datetime.utcnow()-datetime.timedelta(hours=HOURS))
 
-          # walk root -> theme -> series -> files
-          data={}  # theme -> series -> [ep,...]
-          total=0
-          for theme in qf(f"'{root}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",'files(id,name)'):
-              for series in qf(f"'{theme['id']}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",'files(id,name)'):
-                  for v in qf(f"'{series['id']}' in parents and trashed=false"):
-                      if v['mimeType']=='application/vnd.google-apps.folder': continue
-                      ct=v.get('createdTime','')
-                      try: cd=datetime.datetime.strptime(ct[:19],'%Y-%m-%dT%H:%M:%S')
-                      except: continue
-                      if cd<cutoff: continue
-                      nm=v['name']
-                      import re as _re
-                      nm=_re.sub(r'\s*\[[\w-]{6,}\]\.(mp4|mkv|webm)$','',nm)
-                      data.setdefault(theme['name'],{}).setdefault(series['name'],[]).append(
-                          {'title':nm,'link':v.get('webViewLink') or f"https://drive.google.com/file/d/{v['id']}/view"})
-                      total+=1
+          # root -> series -> files (recent only)
+          byseries={}; total=0
+          for series in qf(f"'{root}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",'files(id,name)'):
+              for v in qf(f"'{series['id']}' in parents and trashed=false"):
+                  if v['mimeType']=='application/vnd.google-apps.folder': continue
+                  try: cd=datetime.datetime.strptime(v.get('createdTime','')[:19],'%Y-%m-%dT%H:%M:%S')
+                  except: continue
+                  if cd<cutoff: continue
+                  nm=re.sub(r'\s*\[[\w-]{6,}\]\.(mp4|mkv|webm)$','',v['name'])
+                  byseries.setdefault(series['name'],[]).append(
+                      {'title':nm,'link':v.get('webViewLink') or f"https://drive.google.com/file/d/{v['id']}/view"})
+                  total+=1
 
           today=(datetime.datetime.utcnow()+datetime.timedelta(hours=3)).strftime('%d/%m/%Y')
-          COL={'כספים ונדל״ן':'#0e7490','ויכוחים ופוליטיקה':'#b91c1c','חסידות ושליחות':'#7c3aed',
-               'הלכה ויהדות':'#15803d','בריאות וחברה':'#c2410c','אישים וסיפורים':'#a16207','שונות':'#475569'}
           def esc(s): return (s or '').replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
+          PAL=['#0e7490','#b91c1c','#7c3aed','#15803d','#c2410c','#a16207','#1d4ed8','#be185d']
 
           head=f"""<div style="font-family:Arial,Helvetica,sans-serif;direction:rtl;text-align:right;background:#f1f5f9;padding:0;margin:0">
           <div style="max-width:640px;margin:0 auto;background:#fff">
           <div style="background:linear-gradient(135deg,#1e3a8a,#7c3aed);padding:26px 24px;color:#fff">
             <div style="font-size:13px;opacity:.85;letter-spacing:1px">תוכן אחד · ערוץ הפודקאסט החרדי</div>
-            <div style="font-size:26px;font-weight:800;margin-top:4px">🎬 פרקים חדשים היום</div>
+            <div style="font-size:26px;font-weight:800;margin-top:4px">🎬 פרקים חדשים</div>
             <div style="font-size:14px;opacity:.9;margin-top:6px">{today} · {total} פרקים חדשים</div>
           </div>"""
           if total==0:
@@ -82,26 +75,20 @@ jobs:
                 אין פרקים חדשים ב-24 השעות האחרונות. 🌱<br><span style="font-size:13px;color:#94a3b8">המערכת פעילה ותעדכן אותך מחר.</span></div>"""
           else:
               secs=[]
-              for theme in sorted(data, key=lambda t:-sum(len(v) for v in data[t].values())):
-                  c=COL.get(theme,'#475569'); n=sum(len(v) for v in data[theme].values())
-                  rows=[]
-                  for series in sorted(data[theme]):
-                      eps=data[theme][series]
-                      items=''.join(
-                        f"""<tr><td style="padding:8px 0;border-bottom:1px solid #eef2f7">
-                        <a href="{esc(e['link'])}" style="color:#1d4ed8;text-decoration:none;font-size:14px;font-weight:600">▶ {esc(e['title'])}</a>
-                        </td></tr>""" for e in eps)
-                      rows.append(f"""<div style="margin:14px 0 4px">
-                        <div style="font-size:15px;font-weight:800;color:#0f172a;border-right:4px solid {c};padding-right:8px">{esc(series)} <span style="font-size:12px;color:#94a3b8">({len(eps)})</span></div>
-                        <table style="width:100%;border-collapse:collapse;margin-top:4px">{items}</table></div>""")
-                  secs.append(f"""<div style="padding:6px 24px 2px">
-                    <div style="display:inline-block;background:{c};color:#fff;font-weight:800;font-size:14px;padding:5px 14px;border-radius:20px;margin:14px 0 2px">{esc(theme)} · {n}</div>
-                    {''.join(rows)}</div>""")
+              for idx,series in enumerate(sorted(byseries, key=lambda s:-len(byseries[s]))):
+                  c=PAL[idx%len(PAL)]; eps=byseries[series]
+                  items=''.join(
+                    f"""<tr><td style="padding:9px 0;border-bottom:1px solid #eef2f7">
+                    <a href="{esc(e['link'])}" style="color:#1d4ed8;text-decoration:none;font-size:14px;font-weight:600">▶ {esc(e['title'])}</a>
+                    </td></tr>""" for e in eps)
+                  secs.append(f"""<div style="padding:8px 24px 2px">
+                    <div style="display:inline-block;background:{c};color:#fff;font-weight:800;font-size:14px;padding:6px 15px;border-radius:20px;margin:14px 0 4px">{esc(series)} · {len(eps)}</div>
+                    <table style="width:100%;border-collapse:collapse">{items}</table></div>""")
               body=head+''.join(secs)
           html=body+"""<div style="padding:18px 24px;background:#f8fafc;color:#94a3b8;font-size:12px;text-align:center;border-top:1px solid #e2e8f0">
-            כל הפרקים נשמרים ב-Drive בתיקייה <b>"תוכן אחד"</b> · מסודרים לפי קטגוריה וסדרה.<br>מייל אוטומטי יומי · 08:00</div></div></div>"""
+            כל הפרקים נשמרים ב-Drive בתיקייה <b>"תוכן אחד"</b> · מסודרים לפי סדרה.<br>מייל אוטומטי יומי · 08:00</div></div></div>"""
 
-          plain=f'תוכן אחד — {total} פרקים חדשים ({today}). פרטים במייל HTML.'
+          plain=f'תוכן אחד — {total} פרקים חדשים ({today}).'
           form=P.urlencode({'action':'sendEmail','token':TOKEN,'to':TO,
               'subject':f'🎬 תוכן אחד — {total} פרקים חדשים [{today}]',
               'bodyB64':base64.b64encode(plain.encode()).decode(),
