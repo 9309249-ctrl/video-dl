@@ -1,4 +1,4 @@
-name: Tochen Echad - Daily (categorized -> Drive)
+name: Tochen Echad - Daily (by series -> Drive)
 on:
   schedule:
     - cron: '0 2 * * *'          # 02:00 UTC = 05:00 IDT, before the 08:00 email
@@ -24,11 +24,15 @@ jobs:
         uses: fscarmen/warp-on-actions@v1.1
         with:
           stack: dual
+      - name: Install Deno (JS runtime required by yt-dlp for YouTube)
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
       - name: Install tools
         run: |
           sudo apt-get update -qq && sudo apt-get install -y ffmpeg
           pip install -q --upgrade yt-dlp
-      - name: Download + categorize
+      - name: Download by series
         env:
           CLIENT_ID: ${{ secrets.DRIVE_CLIENT_ID }}
           CLIENT_SECRET: ${{ secrets.DRIVE_CLIENT_SECRET }}
@@ -71,10 +75,10 @@ jobs:
           root=f[0]['id'] if f else api('https://www.googleapis.com/drive/v3/files','POST',{'name':ROOT_NAME,'mimeType':'application/vnd.google-apps.folder'})['id']
           print('Root:',root,flush=True)
 
-          # existing ids (scan theme -> series -> files, 3 levels)
+          # existing ids across ALL nested folders (dedup)
           existing=set()
-          def scan(folder_id):
-              for c in qf(f"'{folder_id}' in parents and trashed=false"):
+          def scan(fid):
+              for c in qf(f"'{fid}' in parents and trashed=false"):
                   if c['mimeType']=='application/vnd.google-apps.folder': scan(c['id'])
                   else:
                       m=re.search(r'\[([\w-]{6,})\]',c.get('name',''))
@@ -89,43 +93,26 @@ jobs:
           print(f'Channel total: {len(rows)} | new: {len(new)}',flush=True)
           if not new: print('Nothing new.'); sys.exit(0)
 
-          # ---- categorization: super-theme (folder) -> series (subfolder) ----
-          THEMES=[
-            ('כספים ונדל״ן', ['stock','market','exchange','finance','mortgage','estate','wallet','capital','real estate','נדל','כסף','כספים','משכנת','פיננס','בורס','שוק ההון','דיור','מיליון','השקע','הון','גמח','גמ״ח']),
-            ('ויכוחים ופוליטיקה', ['debate','neturei','ballot','election','גיוס','בג״ץ','בגץ','בחיר','נטורי קרתא','ויכוח','פוליטי','מפלג','כנסת','קלפי','בית משפט']),
-            ('חסידות ושליחות', ['chabad','emissar','shluchim','mission','חב״ד','חבד','שליח','שלוח','ליובאוויטש','רבי מ']),
-            ('הלכה ויהדות', ['halacha','kashrut','kosher','shabbat','tisha','מקדש','כשרות','כשר','שבת','הלכה','אמונ','תשעה באב','ברכ','מצוו','תורה','כשרו']),
-            ('בריאות וחברה', ['health','nerves','diet','eating','psycholog','נפש','בריאות','דיאט','עצב','חברה','מגזר','פסיכ','אוכל','תזונ']),
-            ('אישים וסיפורים', ['story','figure','genealog','family tree','biograph','history','crusade','סיפור','דמות','נכד','מרן','אדמו','היסטור','שושל','יוחסין','זכרון','מסע','גדול','חזון איש']),
-          ]
-          def theme_of(title):
-              t=title.lower()
-              for name,kws in THEMES:
-                  for k in kws:
-                      if k.lower() in t: return name
-              return 'שונות'
           def series_of(title):
               parts=[p.strip() for p in re.split(r'[｜|]',title) if p.strip()]
               s=parts[0] if parts else title
               s=re.sub(r'^(עם |with |on |the )','',s,flags=re.I).strip()
               s=re.sub(r'[\\/:*?"<>]',' ',s).strip()
-              # drop trailing "episode/פרק N"
               s=re.sub(r'\s*(episode|פרק)\s*\S*$','',s,flags=re.I).strip()
-              return (s[:60] or 'כללי')
+              return (s[:70] or 'כללי')
 
           os.makedirs('dl',exist_ok=True)
-          theme_cache={}; series_cache={}
-          done=0; manifest=[]
+          series_cache={}; done=0; manifest=[]
           for i,(vid,title) in enumerate(new):
               if i and i%8==0: token=refresh()
-              r=subprocess.run(['yt-dlp','-f',f'best[height<={MAXH}]/best','--no-playlist','-o','dl/%(title)s [%(id)s].%(ext)s',f'https://www.youtube.com/watch?v={vid}'],capture_output=True,text=True,timeout=1500)
-              if r.returncode!=0: print(f'DL FAIL {vid}: {r.stderr[-140:]}',flush=True); continue
+              r=subprocess.run(['yt-dlp','-f',f'best[height<={MAXH}]/best','--no-playlist',
+                                '-o','dl/%(title)s [%(id)s].%(ext)s',f'https://www.youtube.com/watch?v={vid}'],
+                               capture_output=True,text=True,timeout=1500)
+              if r.returncode!=0: print(f'DL FAIL {vid}: {r.stderr[-160:]}',flush=True); continue
               fl=[x for x in os.listdir('dl') if f'[{vid}]' in x]
               if not fl: continue
-              fn=fl[0]; path=os.path.join('dl',fn)
-              theme=theme_of(title); series=series_of(title)
-              tid=theme_cache.get(theme) or theme_cache.setdefault(theme,ensure(root,theme))
-              key=(theme,series); sid=series_cache.get(key) or series_cache.setdefault(key,ensure(tid,series))
+              fn=fl[0]; path=os.path.join('dl',fn); series=series_of(title)
+              sid=series_cache.get(series) or series_cache.setdefault(series,ensure(root,series))
               with open(path,'rb') as fh: data=fh.read()
               bnd='----TE'; meta=json.dumps({'name':fn,'parents':[sid]}).encode()
               body=(f'--{bnd}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'.encode()+meta+
@@ -133,27 +120,25 @@ jobs:
               try:
                   R.urlopen(R.Request('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',data=body,method='POST',
                       headers={'Authorization':f'Bearer {token}','Content-Type':f'multipart/related; boundary={bnd}'}),timeout=1800).read()
-                  done+=1; manifest.append({'theme':theme,'series':series,'title':title,'id':vid})
-                  print(f'OK [{i+1}/{len(new)}] {theme} / {series} :: {title[:50]} ({len(data)//1048576}MB)',flush=True)
+                  done+=1; manifest.append({'series':series,'title':title,'id':vid})
+                  print(f'OK [{i+1}/{len(new)}] {series} :: {title[:55]} ({len(data)//1048576}MB)',flush=True)
               except Exception as e:
                   print(f'UP ERR {fn[:40]}: {str(e)[:120]}',flush=True)
               try: os.remove(path)
               except: pass
-          # write manifest into Drive root as _last_run.json (read by email job)
-          man={'downloaded':done,'items':manifest}
-          mb=json.dumps(man,ensure_ascii=False).encode()
+
+          # manifest _last_run.json at root (read by email job)
+          mb=json.dumps({'downloaded':done,'items':manifest},ensure_ascii=False).encode()
           ex=qf(f"name='_last_run.json' and '{root}' in parents and trashed=false")
-          bnd='----MAN'; meta=json.dumps({'name':'_last_run.json','parents':[root]}).encode()
+          bnd='----MAN'
+          if ex:
+              meta=json.dumps({'name':'_last_run.json'}).encode()
+              url=f'https://www.googleapis.com/upload/drive/v3/files/{ex[0]["id"]}?uploadType=multipart'; m='PATCH'
+          else:
+              meta=json.dumps({'name':'_last_run.json','parents':[root]}).encode()
+              url='https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart'; m='POST'
           body=(f'--{bnd}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'.encode()+meta+
                 f'\r\n--{bnd}\r\nContent-Type: application/json\r\n\r\n'.encode()+mb+f'\r\n--{bnd}--\r\n'.encode())
-          url='https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart'
-          if ex:
-              url=f'https://www.googleapis.com/upload/drive/v3/files/{ex[0]["id"]}?uploadType=multipart'
-              meta2=json.dumps({'name':'_last_run.json'}).encode()
-              body=(f'--{bnd}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'.encode()+meta2+
-                    f'\r\n--{bnd}\r\nContent-Type: application/json\r\n\r\n'.encode()+mb+f'\r\n--{bnd}--\r\n'.encode())
-              R.urlopen(R.Request(url,data=body,method='PATCH',headers={'Authorization':f'Bearer {token}','Content-Type':f'multipart/related; boundary={bnd}'}),timeout=120).read()
-          else:
-              R.urlopen(R.Request(url,data=body,method='POST',headers={'Authorization':f'Bearer {token}','Content-Type':f'multipart/related; boundary={bnd}'}),timeout=120).read()
-          print(f'\nDone: {done}/{len(new)} new episodes categorized into תוכן אחד/<theme>/<series>.')
+          R.urlopen(R.Request(url,data=body,method=m,headers={'Authorization':f'Bearer {token}','Content-Type':f'multipart/related; boundary={bnd}'}),timeout=120).read()
+          print(f'\nDone: {done}/{len(new)} new episodes into תוכן אחד/<series>.')
           PYEOF
