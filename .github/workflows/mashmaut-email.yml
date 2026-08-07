@@ -1,0 +1,105 @@
+name: Al HaMashmaut - Daily Email 08:10
+on:
+  schedule:
+    - cron: '10 5 * * *'          # 05:00 UTC = 08:00 IDT (summer) / 07:00 IST (winter)
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: 'Look-back window in hours'
+        default: '26'
+
+jobs:
+  email:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Build + send email
+        env:
+          CLIENT_ID: ${{ secrets.DRIVE_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.DRIVE_CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.DRIVE_REFRESH_TOKEN }}
+          HOURS: ${{ inputs.hours || '26' }}
+        run: |
+          python3 << 'PYEOF'
+          import urllib.request as R, urllib.parse as P, json, os, sys, base64, datetime, re
+
+          CLIENT_ID=os.environ['CLIENT_ID']; CLIENT_SECRET=os.environ['CLIENT_SECRET']; REFRESH=os.environ['REFRESH_TOKEN']
+          HOURS=int(os.environ.get('HOURS','26'))
+          ROOT_NAME='על המשמעות - יוטיוב'
+          WH='https://script.google.com/macros/s/AKfycbzhRqTLE4fjjDqrH1we-JlGZ15R-ws8b_gfWF1xF1ewailaiyiS_YXqUhRtb3cQghVt/exec'
+          TOKEN='BHT_AGENT_2026'; TO='6742853@gmail.com'
+
+          _td=P.urlencode({'client_id':CLIENT_ID,'client_secret':CLIENT_SECRET,'refresh_token':REFRESH,'grant_type':'refresh_token'}).encode()
+          token=json.load(R.urlopen(R.Request('https://oauth2.googleapis.com/token',data=_td,method='POST')))['access_token']
+          import time as _t
+          def api(u):
+              last=None
+              for a in range(5):
+                  try: return json.load(R.urlopen(R.Request(u,headers={'Authorization':f'Bearer {token}'}),timeout=90))
+                  except Exception as e:
+                      last=e; _t.sleep(3*(a+1))
+              raise last
+          def qf(query,fields='files(id,name,mimeType,createdTime,webViewLink)'):
+              out,pg=[],None
+              while True:
+                  u='https://www.googleapis.com/drive/v3/files?q='+P.quote(query)+'&fields=nextPageToken,'+fields+'&pageSize=1000'
+                  if pg:u+='&pageToken='+pg
+                  r=api(u);out+=r.get('files',[]);pg=r.get('nextPageToken')
+                  if not pg:break
+              return out
+
+          f=qf(f"name='{ROOT_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false",'files(id,name)')
+          if not f: print('root missing'); sys.exit(0)
+          root=f[0]['id']
+          cutoff=(datetime.datetime.utcnow()-datetime.timedelta(hours=HOURS))
+
+          # root -> series -> files (recent only)
+          byseries={}; total=0
+          for series in qf(f"'{root}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",'files(id,name)'):
+              for v in qf(f"'{series['id']}' in parents and trashed=false"):
+                  if v['mimeType']=='application/vnd.google-apps.folder': continue
+                  try: cd=datetime.datetime.strptime(v.get('createdTime','')[:19],'%Y-%m-%dT%H:%M:%S')
+                  except: continue
+                  if cd<cutoff: continue
+                  nm=re.sub(r'\s*\[[\w-]{6,}\]\.(mp4|mkv|webm)$','',v['name'])
+                  byseries.setdefault(series['name'],[]).append(
+                      {'title':nm,'link':v.get('webViewLink') or f"https://drive.google.com/file/d/{v['id']}/view"})
+                  total+=1
+
+          today=(datetime.datetime.utcnow()+datetime.timedelta(hours=3)).strftime('%d/%m/%Y')
+          def esc(s): return (s or '').replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
+          PAL=['#0e7490','#b91c1c','#7c3aed','#15803d','#c2410c','#a16207','#1d4ed8','#be185d']
+
+          head=f"""<div style="font-family:Arial,Helvetica,sans-serif;direction:rtl;text-align:right;background:#f1f5f9;padding:0;margin:0">
+          <div style="max-width:640px;margin:0 auto;background:#fff">
+          <div style="background:linear-gradient(135deg,#1e3a8a,#7c3aed);padding:26px 24px;color:#fff">
+            <div style="font-size:13px;opacity:.85;letter-spacing:1px">על המשמעות · פודקאסט</div>
+            <div style="font-size:26px;font-weight:800;margin-top:4px">🎬 פרקים חדשים</div>
+            <div style="font-size:14px;opacity:.9;margin-top:6px">{today} · {total} פרקים חדשים</div>
+          </div>"""
+          if total==0:
+              body=head+"""<div style="padding:34px 24px;color:#334155;font-size:16px;text-align:center">
+                אין פרקים חדשים ב-24 השעות האחרונות. 🌱<br><span style="font-size:13px;color:#94a3b8">המערכת פעילה ותעדכן אותך מחר.</span></div>"""
+          else:
+              secs=[]
+              for idx,series in enumerate(sorted(byseries, key=lambda s:-len(byseries[s]))):
+                  c=PAL[idx%len(PAL)]; eps=byseries[series]
+                  items=''.join(
+                    f"""<tr><td style="padding:9px 0;border-bottom:1px solid #eef2f7">
+                    <a href="{esc(e['link'])}" style="color:#1d4ed8;text-decoration:none;font-size:14px;font-weight:600">▶ {esc(e['title'])}</a>
+                    </td></tr>""" for e in eps)
+                  secs.append(f"""<div style="padding:8px 24px 2px">
+                    <div style="display:inline-block;background:{c};color:#fff;font-weight:800;font-size:14px;padding:6px 15px;border-radius:20px;margin:14px 0 4px">{esc(series)} · {len(eps)}</div>
+                    <table style="width:100%;border-collapse:collapse">{items}</table></div>""")
+              body=head+''.join(secs)
+          html=body+"""<div style="padding:18px 24px;background:#f8fafc;color:#94a3b8;font-size:12px;text-align:center;border-top:1px solid #e2e8f0">
+            כל הפרקים נשמרים ב-Drive בתיקייה <b>"על המשמעות"</b> · מסודרים לפי סדרה.<br>מייל אוטומטי יומי · 08:00</div></div></div>"""
+
+          plain=f'על המשמעות — {total} פרקים חדשים ({today}).'
+          form=P.urlencode({'action':'sendEmail','token':TOKEN,'to':TO,
+              'subject':f'🎬 על המשמעות — {total} פרקים חדשים [{today}]',
+              'bodyB64':base64.b64encode(plain.encode()).decode(),
+              'htmlBodyB64':base64.b64encode(html.encode()).decode()}).encode()
+          resp=R.urlopen(R.Request(WH,data=form,method='POST'),timeout=90).read().decode('utf-8','replace')
+          print('email sent, total=%d, resp=%s'%(total,resp[:200]))
+          PYEOF
