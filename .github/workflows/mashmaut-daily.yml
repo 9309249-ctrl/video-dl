@@ -118,13 +118,20 @@ jobs:
           print(f'Channel total: {len(rows)} | new: {len(new)}',flush=True)
           if not new: print('Nothing new.'); sys.exit(0)
 
+          COMMON=['--no-playlist','--sleep-requests','1.5','--min-sleep-interval','2','--max-sleep-interval','7',
+                  '--retries','6','--fragment-retries','12','--file-access-retries','4',
+                  '-o','dl/%(title)s [%(id)s].%(ext)s']
+          def dl(vid,clients):
+              return subprocess.run(['yt-dlp','-f',f'best[height<={MAXH}]/best',
+                  '--extractor-args',f'youtube:player_client={clients}']+COMMON+[f'https://www.youtube.com/watch?v={vid}'],
+                  capture_output=True,text=True,timeout=1800)
           os.makedirs('dl',exist_ok=True)
           cat_cache={}; done=0
           for i,(vid,title) in enumerate(new):
               if i and i%8==0: token=refresh()
-              r=subprocess.run(['yt-dlp','-f',f'best[height<={MAXH}]/best','--no-playlist',
-                                '-o','dl/%(title)s [%(id)s].%(ext)s',f'https://www.youtube.com/watch?v={vid}'],
-                               capture_output=True,text=True,timeout=1500)
+              r=dl(vid,'default,tv,ios,web_safari')
+              if r.returncode!=0:
+                  _t.sleep(6); r=dl(vid,'android,ios,mweb,tv')
               if r.returncode!=0: print(f'DL FAIL {vid}: {r.stderr[-150:]}',flush=True); continue
               fl=[x for x in os.listdir('dl') if f'[{vid}]' in x]
               if not fl: continue
