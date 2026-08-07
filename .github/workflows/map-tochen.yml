@@ -1,0 +1,20 @@
+name: Map Tochen Echad
+on: { workflow_dispatch: {} }
+jobs:
+  map:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: WARP
+        uses: fscarmen/warp-on-actions@v1.1
+        with: { stack: dual }
+      - name: yt-dlp
+        run: pip install -q -U yt-dlp
+      - name: Map
+        run: |
+          yt-dlp --flat-playlist --print "%(title)s" "https://www.youtube.com/@תוכן_אחד/videos" > t.txt 2>e.txt || true
+          echo "TOTAL=$(wc -l < t.txt)"
+          echo "===== FIRST 60 TITLES ====="
+          head -60 t.txt
+          echo "===== ERRORS(tail) ====="
+          tail -5 e.txt
