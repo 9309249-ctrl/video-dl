@@ -31,7 +31,14 @@ jobs:
 
           _td=P.urlencode({'client_id':CLIENT_ID,'client_secret':CLIENT_SECRET,'refresh_token':REFRESH,'grant_type':'refresh_token'}).encode()
           token=json.load(R.urlopen(R.Request('https://oauth2.googleapis.com/token',data=_td,method='POST')))['access_token']
-          def api(u): return json.load(R.urlopen(R.Request(u,headers={'Authorization':f'Bearer {token}'}),timeout=90))
+          import time as _t
+          def api(u):
+              last=None
+              for a in range(5):
+                  try: return json.load(R.urlopen(R.Request(u,headers={'Authorization':f'Bearer {token}'}),timeout=90))
+                  except Exception as e:
+                      last=e; _t.sleep(3*(a+1))
+              raise last
           def qf(query,fields='files(id,name,mimeType,createdTime,webViewLink)'):
               out,pg=[],None
               while True:
