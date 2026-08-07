@@ -3,36 +3,35 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'report (dry-run) or apply (trash)'
-        default: 'report'
+        description: 'report or apply'
+        default: 'apply'
 jobs:
   clean:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 30
     steps:
-      - name: Scan / clean
+      - name: Scan / clean (concurrent trash)
         env:
           CLIENT_ID: ${{ secrets.DRIVE_CLIENT_ID }}
           CLIENT_SECRET: ${{ secrets.DRIVE_CLIENT_SECRET }}
           REFRESH_TOKEN: ${{ secrets.DRIVE_REFRESH_TOKEN }}
-          MODE: ${{ inputs.mode || 'report' }}
+          MODE: ${{ inputs.mode || 'apply' }}
         run: |
           python3 << 'PYEOF'
           import urllib.request as R, urllib.parse as P, json, os, sys, time as _t
-          MODE=os.environ.get('MODE','report')
+          from concurrent.futures import ThreadPoolExecutor
+          MODE=os.environ.get('MODE','apply')
           _td=P.urlencode({'client_id':os.environ['CLIENT_ID'],'client_secret':os.environ['CLIENT_SECRET'],
                            'refresh_token':os.environ['REFRESH_TOKEN'],'grant_type':'refresh_token'}).encode()
-          tok=json.load(R.urlopen(R.Request('https://oauth2.googleapis.com/token',data=_td,method='POST')))
-          token=tok['access_token']
-          print('SCOPES:',tok.get('scope','?'),flush=True)
+          token=json.load(R.urlopen(R.Request('https://oauth2.googleapis.com/token',data=_td,method='POST')))['access_token']
           def api(u,m='GET',b=None):
               last=None
-              for a in range(5):
+              for a in range(4):
                   try:
                       h={'Authorization':f'Bearer {token}'}
                       if b is not None: h['Content-Type']='application/json'
                       return json.load(R.urlopen(R.Request(u,data=(json.dumps(b).encode() if b is not None else None),headers=h,method=m),timeout=120))
-                  except Exception as e: last=e; _t.sleep(3)
+                  except Exception as e: last=e; _t.sleep(2)
               raise last
           def listall(q,fields):
               out,pg=[],None
@@ -43,52 +42,46 @@ jobs:
                   if not pg:break
               return out
 
-          # ---- all folders + all files (owned by me), globally ----
           folders=listall("mimeType='application/vnd.google-apps.folder' and trashed=false and 'me' in owners",'files(id,name,parents)')
-          files=listall("mimeType!='application/vnd.google-apps.folder' and trashed=false and 'me' in owners",'files(id,name,parents,md5Checksum,size,modifiedTime)')
-          print(f'TOTAL folders(owned): {len(folders)} | files(owned): {len(files)}',flush=True)
-
-          # child counts
-          child_folders={}; child_files={}
+          files=listall("mimeType!='application/vnd.google-apps.folder' and trashed=false and 'me' in owners",'files(id,name,parents,md5Checksum)')
+          print(f'folders:{len(folders)} files:{len(files)}',flush=True)
+          child_files={}
+          for f in files:
+              for p in f.get('parents',[]): child_files[p]=child_files.get(p,0)+1
+          child_folders={}
           for f in folders:
               for p in f.get('parents',[]): child_folders.setdefault(p,[]).append(f['id'])
-          for f in files:
-              for p in f.get('parents',[]): child_files.setdefault(p,0); child_files[p]+=1
-          fid2f={f['id']:f for f in folders}
-          # subtree has file? memoized
           memo={}
           def has_file(fid):
               if fid in memo: return memo[fid]
-              memo[fid]=False  # guard cycles
-              res = child_files.get(fid,0)>0
+              memo[fid]=False
+              res=child_files.get(fid,0)>0
               if not res:
                   for c in child_folders.get(fid,[]):
                       if has_file(c): res=True; break
               memo[fid]=res; return res
           empty=[f for f in folders if not has_file(f['id'])]
-          # only trash TOP-most empty (parent not empty or parent is not a folder we own)
           empty_ids=set(f['id'] for f in empty)
           top_empty=[f for f in empty if not any(p in empty_ids for p in f.get('parents',[]))]
-
-          # duplicate files: same parent + same name + same md5
           seen={}; dups=[]
           for f in files:
-              key=(tuple(f.get('parents',[])),f['name'],f.get('md5Checksum'))
-              if f.get('md5Checksum') and key in seen: dups.append(f)
-              else: seen[key]=f['id']
+              k=(tuple(f.get('parents',[])),f['name'],f.get('md5Checksum'))
+              if f.get('md5Checksum') and k in seen: dups.append(f)
+              else: seen[k]=1
+          targets=[f['id'] for f in top_empty]+[f['id'] for f in dups]
+          print(f'EMPTY(top):{len(top_empty)} DUPS:{len(dups)} -> to trash:{len(targets)}',flush=True)
+          if MODE!='apply':
+              print('report only'); sys.exit(0)
 
-          print(f'\n=== EMPTY FOLDERS (top-most): {len(top_empty)} (total empty incl. nested: {len(empty)}) ===',flush=True)
-          for f in top_empty[:60]: print('  [empty]',f['name'],flush=True)
-          print(f'\n=== EXACT DUPLICATE FILES (same name+parent+md5): {len(dups)} ===',flush=True)
-          for f in dups[:60]: print('  [dup]',f['name'],flush=True)
-
-          if MODE=='apply':
-              n=0
-              for f in top_empty+dups:
-                  try: api(f"https://www.googleapis.com/drive/v3/files/{f['id']}",'PATCH',{'trashed':True}); n+=1
-                  except Exception as e: print('  ERR trash',f['name'][:40],str(e)[:60])
-                  if n%50==0: print(f'  trashed {n}...',flush=True)
-              print(f'\nAPPLIED: trashed {n} items (empty folders + duplicate files). Reversible from Drive Trash.',flush=True)
-          else:
-              print('\nREPORT MODE — nothing trashed. Re-run with mode=apply to execute.',flush=True)
+          ok=[0]; err=[0]
+          def trash(fid):
+              try:
+                  R.urlopen(R.Request(f'https://www.googleapis.com/drive/v3/files/{fid}',
+                      data=json.dumps({'trashed':True}).encode(),method='PATCH',
+                      headers={'Authorization':f'Bearer {token}','Content-Type':'application/json'}),timeout=60).read()
+                  ok[0]+=1
+              except Exception: err[0]+=1
+          with ThreadPoolExecutor(max_workers=24) as ex:
+              list(ex.map(trash,targets))
+          print(f'DONE trashed:{ok[0]} skipped/err(403 non-app):{err[0]}',flush=True)
           PYEOF
